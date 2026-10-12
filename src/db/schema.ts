@@ -11,8 +11,10 @@ import {
   index,
   jsonb,
   boolean,
+  bigint,
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const notificationTypeEnum = pgEnum("notification_type", [
   "task_assigned",
@@ -22,6 +24,15 @@ export const notificationTypeEnum = pgEnum("notification_type", [
   "task_updated",
   "ai_committed",
   "system",
+  "announcement",
+  "document_created",
+  "document_updated",
+  "document_deleted",
+  "resource_logged",
+  "resource_ended",
+  "task_due_soon",
+  "asset_created",
+  "chat_mentioned",
 ]);
 export type NotificationType = (typeof notificationTypeEnum.enumValues)[number];
 
@@ -51,6 +62,8 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
   name: text("name").notNull(),
+  // 成员自报技能标签（自由文本数组，分工参考，非权限）；清洗/限量在 lib/skill-tags.ts
+  skillTags: text("skill_tags").array().notNull().default(sql`'{}'::text[]`),
   // 飞书绑定（一对一，可空=未绑定）：open_id 为应用内用户唯一标识，发私信用之
   feishuOpenId: text("feishu_open_id").unique(),
   feishuName: text("feishu_name"),
@@ -302,6 +315,31 @@ export const taskLabels = pgTable(
 
 // ==================== 本项目新增 P0 模块 ====================
 
+// 公告表：一条公告 = 1 行；发布时按团队成员 fan-out 成 N 条 notifications（见 lib/announcement.ts）
+export const announcements = pgTable('announcements', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  authorId: uuid('author_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("announcements_project_created_idx").on(t.projectId, t.createdAt),
+]);
+
+// 公告评论表：镜像 task_comments（软删 deletedAt，作者或管理员/老师可删）
+export const announcementComments = pgTable('announcement_comments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  announcementId: uuid('announcement_id').notNull().references(() => announcements.id, { onDelete: 'cascade' }),
+  authorId: uuid('author_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("announcement_comments_announcement_created_idx").on(t.announcementId, t.createdAt),
+]);
+
 // 1. 站内通知表
 export const notifications = pgTable('notifications', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -310,11 +348,20 @@ export const notifications = pgTable('notifications', {
   content: text('content').notNull(),
   type: notificationTypeEnum('type').notNull(),
   linkUrl: text('link_url'),
+  // 公告用：发布者 + 对应项目（事件型通知为 null）
+  actorId: uuid('actor_id').references(() => users.id, { onDelete: 'set null' }),
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+  // 公告用：关联公告实体（同一次发布 fan-out 出的 N 行共享此 id）；事件型通知为 null
+  announcementId: uuid('announcement_id').references(() => announcements.id, { onDelete: 'cascade' }),
+  // 变更类通知用：关联具体某条 task_events（「查看变更」跳 /messages/changes/{id}）；公告/系统通知为 null
+  taskEventId: uuid('task_event_id').references(() => taskEvents.id, { onDelete: 'cascade' }),
   isRead: boolean('is_read').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   index("notifications_user_created_idx").on(t.userId, t.createdAt),
   index("notifications_user_unread_idx").on(t.userId, t.isRead),
+  index("notifications_announcement_idx").on(t.announcementId),
+  index("notifications_task_event_idx").on(t.taskEventId),
 ]);
 
 // 2. 任务评论表
@@ -343,3 +390,121 @@ export const taskEvents = pgTable('task_events', {
 }, (t) => [
   index("task_events_task_created_idx").on(t.taskId, t.createdAt),
 ]);
+
+// 3b. 变更评论表：挂在具体某条 task_events 上（镜像 announcement_comments）
+export const taskEventComments = pgTable('task_event_comments', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  eventId: uuid('event_id').notNull().references(() => taskEvents.id, { onDelete: 'cascade' }),
+  authorId: uuid('author_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("task_event_comments_event_created_idx").on(t.eventId, t.createdAt),
+]);
+
+// 4. 云文档：挂在项目下，Markdown 正文，项目内全员可编辑。
+// category 为自由文本分类/目录；全文搜索走 ILIKE（中文不适合 PG 默认分词器）。
+export const documents = pgTable('documents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
+  title: text('title').notNull(),
+  content: text('content').notNull().default(''),
+  category: text('category'),
+  createdById: uuid('created_by_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  updatedById: uuid('updated_by_id').references(() => users.id, { onDelete: 'set null' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("documents_project_idx").on(t.projectId),
+  index("documents_project_category_idx").on(t.projectId, t.category),
+]);
+
+// 5. 真人聊天：dm=全局一对一私聊，group=项目群聊（按项目初始化）
+export const chatRoomTypeEnum = pgEnum("chat_room_type", ["dm", "group"]);
+export type ChatRoomType = (typeof chatRoomTypeEnum.enumValues)[number];
+
+export const chatRooms = pgTable('chat_rooms', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  type: chatRoomTypeEnum('type').notNull(),
+  // group 用：绑定项目
+  projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }),
+  // dm 用：全局一对一，规范化 A<B 存储，唯一约束防重复
+  dmUserAId: uuid('dm_user_a_id').references(() => users.id, { onDelete: 'cascade' }),
+  dmUserBId: uuid('dm_user_b_id').references(() => users.id, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("chat_rooms_project_idx").on(t.projectId),
+  uniqueIndex("chat_rooms_dm_pair_unique").on(t.dmUserAId, t.dmUserBId),
+]);
+
+// 每成员每会话的已读水位（lastReadAt null=从未读）。DM 建会话即写两行；群聊首次读时懒写。
+// 仅作读状态，不作为发消息的准入依据（发消息权限另由 dm 双方/团队身份判定）。
+export const chatRoomMembers = pgTable('chat_room_members', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  roomId: uuid('room_id').notNull().references(() => chatRooms.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  lastReadAt: timestamp('last_read_at', { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("chat_room_members_room_user_unique").on(t.roomId, t.userId),
+  index("chat_room_members_user_idx").on(t.userId),
+]);
+
+export const chatMessages = pgTable('chat_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  roomId: uuid('room_id').notNull().references(() => chatRooms.id, { onDelete: 'cascade' }),
+  senderId: uuid('sender_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  content: text('content').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("chat_messages_room_created_idx").on(t.roomId, t.createdAt),
+]);
+
+// ==================== 资产管理模块（assets） ====================
+
+// 资产类型：file=上传文件（url 存文件地址），link=外部链接（url 存链接地址）
+export const assetTypeEnum = pgEnum("asset_type", ["file", "link"]);
+export type AssetType = (typeof assetTypeEnum.enumValues)[number];
+
+// 项目资产：挂在 project 下。权限沿用团队可见性——asset → project → team 链条，
+// 同团队所有人可见本团队所有项目资产、非团队成员禁止访问；故不另设 team_id 字段。
+// taskId / docId 可空：一个资产至多关联一个任务、一个文档；被关联对象删除时置 null，资产保留。
+export const assets = pgTable(
+  "assets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // 归属项目（权限锚点，经 project.teamId 推到团队）；删项目级联删资产
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    // 关联任务（可空）：任务删则解除关联，资产保留
+    taskId: uuid("task_id").references(() => tasks.id, { onDelete: "set null" }),
+    // 关联文档（可空）：文档删则解除关联，资产保留
+    docId: uuid("doc_id").references(() => documents.id, { onDelete: "set null" }),
+    // 上传人：用户删除时置 null，资产保留（团队共有资源）
+    uploadUserId: uuid("upload_user_id").references(() => users.id, { onDelete: "set null" }),
+    // 资产名：file=文件名，link=链接标题
+    name: text("name").notNull(),
+    // 描述（选填）
+    description: text("description"),
+    // file | link
+    assetType: assetTypeEnum("asset_type").notNull(),
+    // 文件地址（file 型）或外部链接（link 型）
+    url: text("url").notNull(),
+    // [file] MIME 类型（application/pdf、image/png…），检测不到可为 null
+    fileMime: text("file_mime"),
+    // [file] 字节数（int8，mode:number；单文件 < 2^53 字节足够安全）
+    fileSize: bigint("file_size", { mode: "number" }),
+    // 归档锁定：归档后不再展示于常规列表、禁止再编辑/删除/绑定
+    isArchived: boolean("is_archived").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("assets_project_idx").on(t.projectId),
+    index("assets_task_idx").on(t.taskId),
+    index("assets_doc_idx").on(t.docId),
+  ],
+);

@@ -63,10 +63,24 @@ export async function requireTeamRole(
 // 无权限前置：调用方须已校验访问权（如 getProjectForUser / requireTeamRole）后再调用
 export async function listTeamMembers(teamId: string) {
   return db
-    .select({ id: users.id, name: users.name, role: teamMembers.role })
+    .select({
+      id: users.id,
+      name: users.name,
+      role: teamMembers.role,
+      skillTags: users.skillTags,
+    })
     .from(teamMembers)
     .innerJoin(users, eq(teamMembers.userId, users.id))
     .where(eq(teamMembers.teamId, teamId));
+}
+
+// 我担任管理员的团队（供「所有项目」页新建项目选择所属团队）
+export async function listAdminTeams(actorId: string) {
+  return db
+    .select({ id: teams.id, name: teams.name })
+    .from(teamMembers)
+    .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+    .where(and(eq(teamMembers.userId, actorId), eq(teamMembers.role, "admin")));
 }
 
 export async function updateMemberRole(

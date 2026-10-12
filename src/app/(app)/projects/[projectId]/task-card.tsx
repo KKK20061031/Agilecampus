@@ -10,9 +10,11 @@ import {
   type UpdateTaskState,
 } from "./actions";
 import { LABEL_COLOR_CLASS } from "@/lib/board-columns";
+import { classifyDue, todayStartMs } from "@/lib/due";
 import type { BoardTask } from "./board";
+import { TaskAssets } from "./assets/task-assets";
 
-export type Option = { id: string; name: string };
+export type Option = { id: string; name: string; skillTags?: string[] };
 type TaskOption = { id: string; title: string };
 
 const PRIORITY_BADGE: Record<string, string> = {
@@ -58,6 +60,7 @@ export function TaskCard({
     .filter((d) => d.predecessorId === task.id)
     .map((d) => allTasks.find((t) => t.id === d.successorId)?.title)
     .filter(Boolean);
+  const dueState = classifyDue(task.dueDate, task.status, todayStartMs());
 
   return (
     <div
@@ -67,7 +70,13 @@ export function TaskCard({
           ? { transform: `translate(${transform.x}px, ${transform.y}px)` }
           : undefined
       }
-      className={`ac-card p-3 text-sm transition hover:shadow-md ${isDragging ? "opacity-50" : ""}`}
+      className={`ac-card p-3 text-sm transition hover:shadow-md ${
+        dueState === "overdue"
+          ? "border-high"
+          : dueState === "soon"
+            ? "border-medium"
+            : ""
+      } ${isDragging ? "opacity-50" : ""}`}
     >
       <div
         {...listeners}
@@ -78,7 +87,26 @@ export function TaskCard({
         <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-ink-soft">
           <span>{task.assigneeName ?? "未分配"}</span>
           {(task.startDate || task.dueDate) && (
-            <span>· {task.startDate ?? "…"}→{task.dueDate ?? "…"}</span>
+            <span
+              className={
+                dueState === "overdue"
+                  ? "font-medium text-high"
+                  : dueState === "soon"
+                    ? "font-medium text-medium"
+                    : ""
+              }
+            >
+              · {task.startDate ?? "…"}→{task.dueDate ?? "…"}
+            </span>
+          )}
+          {dueState !== "ok" && (
+            <span
+              className={`ac-badge ${
+                dueState === "overdue" ? "bg-high-soft text-high" : "bg-medium-soft text-medium"
+              }`}
+            >
+              {dueState === "overdue" ? "逾期" : "临期"}
+            </span>
           )}
           <span className={`ac-badge ${PRIORITY_BADGE[task.priority] ?? "bg-low-soft text-low"}`}>
             {task.priority}
@@ -166,6 +194,10 @@ function EditModal({
     null,
   );
 
+  // 负责人受控：据以展示其技能标签，供改派时参考分工
+  const [assigneeId, setAssigneeId] = useState(task.assigneeId ?? "");
+  const assignee = members.find((m) => m.id === assigneeId) ?? null;
+
   // 保存成功（action 回 { ok: true }）即关窗
   useEffect(() => {
     if (updateState && "ok" in updateState) onClose();
@@ -235,14 +267,33 @@ function EditModal({
 
           <div className="grid grid-cols-2 gap-2.5">
             <Field label="负责人">
-              <select name="assigneeId" defaultValue={task.assigneeId ?? ""} className="ac-field text-sm">
+              <select
+                name="assigneeId"
+                value={assigneeId}
+                onChange={(e) => setAssigneeId(e.target.value)}
+                className="ac-field text-sm"
+              >
                 <option value="">未分配</option>
                 {members.map((m) => (
                   <option key={m.id} value={m.id}>
                     {m.name}
+                    {m.skillTags?.length ? `（${m.skillTags.join("/")}）` : ""}
                   </option>
                 ))}
               </select>
+              {assignee && (
+                <span className="flex flex-wrap items-center gap-1 text-xs text-ink-soft">
+                  {assignee.skillTags?.length ? (
+                    assignee.skillTags.map((t) => (
+                      <span key={t} className="ac-badge bg-primary-soft text-primary">
+                        {t}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-ink-faint">该成员暂未填写技能标签</span>
+                  )}
+                </span>
+              )}
             </Field>
             <Field label="里程碑">
               <select name="milestoneId" defaultValue={task.milestoneId ?? ""} className="ac-field text-sm">
@@ -318,6 +369,9 @@ function EditModal({
             </button>
           </div>
         </form>
+
+        {/* 挂载资产：绑定项目已有资产或上传新资产（写入 assets.taskId） */}
+        <TaskAssets projectId={projectId} taskId={task.id} />
 
         <form
           action={deleteFormAction}

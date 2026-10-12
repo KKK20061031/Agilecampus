@@ -1,6 +1,7 @@
 import { desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  chatRooms,
   milestones,
   projects,
   teamMembers,
@@ -22,16 +23,21 @@ export async function createProject(
   },
 ) {
   await requireTeamRole(actorId, teamId, ["admin"]);
-  const [project] = await db
-    .insert(projects)
-    .values({
-      teamId,
-      name: input.name,
-      description: input.description,
-      startDate: input.startDate,
-      endDate: input.endDate,
-    })
-    .returning();
+  const [project] = await db.transaction(async (tx) => {
+    const [p] = await tx
+      .insert(projects)
+      .values({
+        teamId,
+        name: input.name,
+        description: input.description,
+        startDate: input.startDate,
+        endDate: input.endDate,
+      })
+      .returning();
+    // 每个项目自动初始化一个群聊（群聊名读取时由「项目名-团队名」推导）
+    await tx.insert(chatRooms).values({ type: "group", projectId: p.id });
+    return [p];
+  });
   return project;
 }
 
@@ -135,6 +141,43 @@ export async function listProjectMilestones(actorId: string, projectId: string) 
     .orderBy(milestones.targetDate);
 }
 
+// 左侧导航/工作台分组：我加入的团队（含我的角色）+ 各团队的项目
+export async function listMyTeamsWithProjects(actorId: string) {
+  const memberships = await db
+    .select({
+      id: teams.id,
+      name: teams.name,
+      role: teamMembers.role,
+    })
+    .from(teamMembers)
+    .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+    .where(eq(teamMembers.userId, actorId));
+
+  const teamIds = memberships.map((m) => m.id);
+  let projRows: { id: string; name: string; teamId: string }[] = [];
+  if (teamIds.length > 0) {
+    projRows = await db
+      .select({ id: projects.id, name: projects.name, teamId: projects.teamId })
+      .from(projects)
+      .where(inArray(projects.teamId, teamIds))
+      .orderBy(desc(projects.createdAt));
+  }
+
+  const byTeam = new Map<string, { id: string; name: string }[]>();
+  for (const p of projRows) {
+    const arr = byTeam.get(p.teamId) ?? [];
+    arr.push({ id: p.id, name: p.name });
+    byTeam.set(p.teamId, arr);
+  }
+
+  return memberships.map((m) => ({
+    id: m.id,
+    name: m.name,
+    role: m.role,
+    projects: byTeam.get(m.id) ?? [],
+  }));
+}
+
 // 跨团队聚合：我所在全部团队的项目 + 团队名 + 任务统计
 export async function listMyProjects(actorId: string) {
   const memberships = await db
@@ -151,6 +194,9 @@ export async function listMyProjects(actorId: string) {
       status: projects.status,
       teamId: projects.teamId,
       teamName: teams.name,
+      description: projects.description,
+      startDate: projects.startDate,
+      endDate: projects.endDate,
       createdAt: projects.createdAt,
     })
     .from(projects)
