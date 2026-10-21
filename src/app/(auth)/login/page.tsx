@@ -4,7 +4,6 @@ import { Suspense, useActionState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { loginAction, type FormState } from "./actions";
-import { FeishuLogin } from "./feishu-login";
 
 function LoginForm() {
   const [state, formAction, pending] = useActionState<FormState, FormData>(
@@ -18,7 +17,7 @@ function LoginForm() {
       <h1 className="font-display text-2xl font-semibold text-ink">登录 AgileCampus</h1>
       {registered && <p className="text-sm text-done">注册成功，请登录。</p>}
       <form action={formAction} className="space-y-3">
-        <input name="email" type="email" placeholder="邮箱" className="ac-field" />
+        <input name="email" placeholder="邮箱 / 学号" className="ac-field" />
         <input name="password" type="password" placeholder="密码" className="ac-field" />
         {state?.error && <p className="text-sm text-high">{state.error}</p>}
         <button disabled={pending} className="ac-btn w-full">
@@ -28,7 +27,6 @@ function LoginForm() {
       <p className="text-sm text-ink-soft">
         没有账号？<Link href="/register" className="text-primary hover:underline">去注册</Link>
       </p>
-      <FeishuLogin />
     </main>
   );
 }

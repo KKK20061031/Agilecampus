@@ -1,6 +1,7 @@
-import { desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
+  chatRooms,
   milestones,
   projects,
   teamMembers,
@@ -22,16 +23,21 @@ export async function createProject(
   },
 ) {
   await requireTeamRole(actorId, teamId, ["admin"]);
-  const [project] = await db
-    .insert(projects)
-    .values({
-      teamId,
-      name: input.name,
-      description: input.description,
-      startDate: input.startDate,
-      endDate: input.endDate,
-    })
-    .returning();
+  const [project] = await db.transaction(async (tx) => {
+    const [p] = await tx
+      .insert(projects)
+      .values({
+        teamId,
+        name: input.name,
+        description: input.description,
+        startDate: input.startDate,
+        endDate: input.endDate,
+      })
+      .returning();
+    // 每个项目自动初始化一个群聊（群聊名读取时由「项目名-团队名」推导）
+    await tx.insert(chatRooms).values({ type: "group", projectId: p.id });
+    return [p];
+  });
   return project;
 }
 
@@ -42,6 +48,35 @@ export async function listTeamProjects(actorId: string, teamId: string) {
     .from(projects)
     .where(eq(projects.teamId, teamId))
     .orderBy(desc(projects.createdAt));
+}
+
+// 团队主页用：某团队的项目 + 任务统计（进度条）
+export async function listTeamProjectsWithStats(actorId: string, teamId: string) {
+  await requireTeamRole(actorId, teamId, ["admin", "teacher", "student"]);
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.teamId, teamId))
+    .orderBy(desc(projects.createdAt));
+
+  if (rows.length === 0) return [];
+
+  const stats = await db
+    .select({
+      projectId: tasks.projectId,
+      status: tasks.status,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(tasks)
+    .where(inArray(tasks.projectId, rows.map((r) => r.id)))
+    .groupBy(tasks.projectId, tasks.status);
+
+  return rows.map((p) => {
+    const mine = stats.filter((s) => s.projectId === p.id);
+    const total = mine.reduce((n, s) => n + s.count, 0);
+    const doneCount = mine.find((s) => s.status === "done")?.count ?? 0;
+    return { ...p, taskTotal: total, doneCount };
+  });
 }
 
 // 项目编辑/归档：仅团队 admin 可动（与 createProject 同一权限口径）
@@ -135,6 +170,76 @@ export async function listProjectMilestones(actorId: string, projectId: string) 
     .orderBy(milestones.targetDate);
 }
 
+// 左侧导航/工作台分组：我加入的团队（含我的角色）+ 各团队的项目
+export async function listMyTeamsWithProjects(actorId: string) {
+  const memberships = await db
+    .select({
+      id: teams.id,
+      name: teams.name,
+      role: teamMembers.role,
+    })
+    .from(teamMembers)
+    .innerJoin(teams, eq(teamMembers.teamId, teams.id))
+    .where(eq(teamMembers.userId, actorId));
+
+  const teamIds = memberships.map((m) => m.id);
+  let projRows: { id: string; name: string; teamId: string }[] = [];
+  if (teamIds.length > 0) {
+    projRows = await db
+      .select({ id: projects.id, name: projects.name, teamId: projects.teamId })
+      .from(projects)
+      .where(inArray(projects.teamId, teamIds))
+      .orderBy(desc(projects.createdAt));
+  }
+
+  const byTeam = new Map<string, { id: string; name: string }[]>();
+  for (const p of projRows) {
+    const arr = byTeam.get(p.teamId) ?? [];
+    arr.push({ id: p.id, name: p.name });
+    byTeam.set(p.teamId, arr);
+  }
+
+  return memberships.map((m) => ({
+    id: m.id,
+    name: m.name,
+    role: m.role,
+    projects: byTeam.get(m.id) ?? [],
+  }));
+}
+
+// 我作为团队管理员（team_role=admin）负责的项目 id 集合。
+// 用于「管理者视角」的跨任务范围口径：不只看分配给我的任务，还要盯住我管理项目里的全部任务。
+export async function listManagedProjectIds(actorId: string): Promise<string[]> {
+  const adminTeams = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(and(eq(teamMembers.userId, actorId), eq(teamMembers.role, "admin")));
+  const teamIds = adminTeams.map((t) => t.teamId);
+  if (teamIds.length === 0) return [];
+
+  const rows = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(inArray(projects.teamId, teamIds));
+  return rows.map((r) => r.id);
+}
+
+// 我所在全部团队下的项目 id 集合（我的资产跨项目聚合范围）
+export async function listMyProjectIds(actorId: string): Promise<string[]> {
+  const memberships = await db
+    .select({ teamId: teamMembers.teamId })
+    .from(teamMembers)
+    .where(eq(teamMembers.userId, actorId));
+  const teamIds = memberships.map((m) => m.teamId);
+  if (teamIds.length === 0) return [];
+
+  const rows = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(inArray(projects.teamId, teamIds));
+  return rows.map((r) => r.id);
+}
+
 // 跨团队聚合：我所在全部团队的项目 + 团队名 + 任务统计
 export async function listMyProjects(actorId: string) {
   const memberships = await db
@@ -151,6 +256,9 @@ export async function listMyProjects(actorId: string) {
       status: projects.status,
       teamId: projects.teamId,
       teamName: teams.name,
+      description: projects.description,
+      startDate: projects.startDate,
+      endDate: projects.endDate,
       createdAt: projects.createdAt,
     })
     .from(projects)
