@@ -6,6 +6,7 @@ import { db } from "@/db";
 import { labels, taskLabels, teams } from "@/db/schema";
 import { getTeamMembership } from "@/lib/team";
 import { listTeamLabels } from "@/lib/label";
+import { BackButton } from "@/components/back-button";
 import { NewLabelForm, LabelRow } from "./label-forms";
 
 export default async function LabelsPage({
@@ -40,8 +41,11 @@ export default async function LabelsPage({
   const isAdmin = me.role === "admin";
 
   return (
-    <main className="mx-auto max-w-2xl space-y-6 py-8">
-      <h1 className="font-display text-2xl font-semibold text-ink">{team.name} · 标签</h1>
+    <main className="mx-auto max-w-2xl space-y-6">
+      <header className="space-y-3">
+        <BackButton fallbackHref={`/teams/${teamId}`} label="返回团队" />
+        <h1 className="font-display text-2xl font-semibold text-ink">{team.name} · 标签</h1>
+      </header>
       <p className="text-sm text-ink-soft">
         标签为团队共用，可贴在任意项目的任务上，用于筛选与分组。
         {!isAdmin && "（仅团队管理员可增删改）"}

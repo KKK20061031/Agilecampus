@@ -17,6 +17,9 @@ import { FilterBar } from "./filter-bar";
 import { listTaskComments } from "@/lib/comment";
 import { listTaskEvents } from "@/lib/activity";
 import { TaskCollaboration } from "./task-collaboration";
+import { BackButton } from "@/components/back-button";
+import Link from "next/link";
+import { scopedHref } from "@/lib/workbench-navigation";
 
 export default async function ProjectPage({
   params,
@@ -34,6 +37,8 @@ export default async function ProjectPage({
   const access = await getProjectForUser(session.user.id, projectId);
   if (!access) notFound();
   const { project, role } = access;
+  const teamId = sp.team === project.teamId ? project.teamId : null;
+  const href = (path: string) => scopedHref(path, teamId);
 
   const [projectMilestones, projectTasks, members, dependencies, teamLabels] = await Promise.all([
     listProjectMilestones(session.user.id, projectId),
@@ -87,16 +92,36 @@ export default async function ProjectPage({
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
   return (
-    <main className="mx-auto max-w-5xl space-y-8 py-8">
-      <header>
+    <main className="mx-auto max-w-5xl space-y-8">
+      <header className="space-y-3">
+        <div className="flex items-center gap-4">
+          <BackButton fallbackHref={href("/projects")} />
+          <Link href={href("/projects")} className="text-sm text-primary">
+            {teamId ? "返回本组工作台" : "返回工作台"}
+          </Link>
+        </div>
         <div className="flex items-start justify-between gap-3">
           <h1 className="font-display text-2xl font-semibold text-ink">{project.name}</h1>
-          <a
-            href={`/projects/${projectId}/timeline`}
-            className="ac-btn-ghost whitespace-nowrap"
-          >
-            时间线
-          </a>
+          <div className="flex shrink-0 gap-2">
+            <a
+              href={href(`/projects/${projectId}/docs`)}
+              className="ac-btn-ghost whitespace-nowrap"
+            >
+              文档
+            </a>
+            <a
+              href={href(`/projects/${projectId}/timeline`)}
+              className="ac-btn-ghost whitespace-nowrap"
+            >
+              时间线
+            </a>
+            <a
+              href={href(`/projects/${projectId}/assets`)}
+              className="ac-btn-ghost whitespace-nowrap"
+            >
+              资产管理
+            </a>
+          </div>
         </div>
         {project.description && (
           <p className="mt-1 text-sm text-ink-soft">{project.description}</p>
@@ -135,6 +160,8 @@ export default async function ProjectPage({
             dueDate: t.dueDate,
             assigneeName: t.assigneeName,
             assigneeId: t.assigneeId,
+            assigneeIds: t.assigneeIds,
+            assignees: t.assignees,
             milestoneId: t.milestoneId,
             labels: t.labels,
           }))}
@@ -161,10 +188,13 @@ export default async function ProjectPage({
               <p className="text-xs font-medium uppercase tracking-[0.12em] text-primary">任务详情</p>
               <h2 className="mt-1 font-display text-xl font-semibold text-ink">{selectedTask.title}</h2>
               <p className="mt-1 text-sm text-ink-soft">
-                {selectedTask.assigneeName ?? "未分配"} · {selectedTask.status} · {selectedTask.dueDate ?? "未设置截止日期"}
+                {selectedTask.assignees.length > 0
+                  ? selectedTask.assignees.map((a) => a.name).join("、")
+                  : "未分配"}{" "}
+                · {selectedTask.status} · {selectedTask.dueDate ?? "未设置截止日期"}
               </p>
             </div>
-            <a href={`/projects/${projectId}`} className="ac-btn-ghost text-xs">关闭</a>
+            <a href={href(`/projects/${projectId}`)} className="ac-btn-ghost text-xs">关闭</a>
           </div>
           {selectedTask.description && (
             <p className="mt-4 whitespace-pre-wrap text-sm text-ink-soft">{selectedTask.description}</p>

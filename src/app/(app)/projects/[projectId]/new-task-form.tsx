@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import { createTaskAction, type FormState } from "./actions";
+import { MemberPicker } from "./member-picker";
 
 export function NewTaskForm({
   projectId,
@@ -9,7 +10,7 @@ export function NewTaskForm({
   milestones,
 }: {
   projectId: string;
-  members: { id: string; name: string }[];
+  members: { id: string; name: string; skillTags: string[] }[];
   milestones: { id: string; title: string }[];
 }) {
   const [state, formAction, pending] = useActionState<FormState, FormData>(
@@ -23,15 +24,11 @@ export function NewTaskForm({
       <input type="hidden" name="projectId" value={projectId} />
       <input name="title" placeholder="任务标题" className="ac-field" />
       <textarea name="description" placeholder="任务描述（可选）" rows={2} className="ac-field" />
+      <div className="space-y-1">
+        <span className="text-xs font-medium text-ink-soft">负责人（可多选）</span>
+        <MemberPicker members={members} name="assigneeIds" emptyHint="不选即未分配" />
+      </div>
       <div className="flex flex-wrap gap-2">
-        <select name="assigneeId" defaultValue="" className="ac-field w-auto text-sm">
-          <option value="">未分配</option>
-          {members.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
         <select name="milestoneId" defaultValue="" className="ac-field w-auto text-sm">
           <option value="">无里程碑</option>
           {milestones.map((m) => (

@@ -1,18 +1,14 @@
-import Link from "next/link";
 import { z } from "zod";
 import { notFound, redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { getProjectForUser, listProjectMilestones } from "@/lib/project";
 import { listProjectTasks } from "@/lib/task";
+import { classifyDue, parseDay, type DueState } from "@/lib/due";
+import { BackButton } from "@/components/back-button";
+import Link from "next/link";
+import { scopedHref } from "@/lib/workbench-navigation";
 
 const DAY = 86_400_000;
-
-// "YYYY-MM-DD" → 本地零点毫秒；无值返回 null
-function parseDay(s: string | null): number | null {
-  if (!s) return null;
-  const t = new Date(`${s}T00:00:00`).getTime();
-  return Number.isNaN(t) ? null : t;
-}
 
 function fmtMD(ms: number): string {
   const d = new Date(ms);
@@ -27,14 +23,16 @@ interface Bar {
   status: string;
   leftPct: number;
   widthPct: number;
-  overdue: boolean;
+  state: DueState;
   rangeLabel: string;
 }
 
 export default async function TimelinePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ projectId: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { projectId } = await params;
   const session = await auth();
@@ -43,6 +41,8 @@ export default async function TimelinePage({
 
   const access = await getProjectForUser(session.user.id, projectId);
   if (!access) notFound();
+  const sp = await searchParams;
+  const teamId = sp.team === access.project.teamId ? access.project.teamId : null;
 
   const [tasks, milestones] = await Promise.all([
     listProjectTasks(session.user.id, projectId),
@@ -70,16 +70,15 @@ export default async function TimelinePage({
   const todayMs = todayStart.getTime();
 
   return (
-    <main className="mx-auto max-w-5xl space-y-6 py-8">
-      <header className="space-y-1">
-        <Link href={`/projects/${projectId}`} className="text-xs text-ink-soft hover:text-primary">
-          ← 返回项目
-        </Link>
+    <main className="mx-auto max-w-5xl space-y-6">
+      <header className="space-y-3">
+        <BackButton fallbackHref={scopedHref(`/projects/${projectId}`, teamId)} />
+        <Link href={scopedHref("/projects", teamId)} className="text-sm text-primary">返回工作台</Link>
         <h1 className="font-display text-2xl font-semibold text-ink">
           {access.project.name} · 时间线
         </h1>
         <p className="text-sm text-ink-soft">
-          按里程碑分组，横条为任务的 [起始日→截止日]。逾期任务标红，竖线为今日。
+          按里程碑分组，横条为任务的 [起始日→截止日]。逾期标红、临期（3 天内）标橙，竖线为今日。
         </p>
       </header>
 
@@ -151,16 +150,21 @@ function Gantt({
     done: "bg-done",
   };
 
+  // 逾期压过状态色；临期用琥珀色提示
+  const DUE_BAR: Record<DueState, string | null> = {
+    overdue: "bg-alert",
+    soon: "bg-medium",
+    ok: null,
+  };
+
   for (const { task, start, end } of scheduled) {
-    const overdue =
-      task.status !== "done" && task.dueDate !== null && (parseDay(task.dueDate) ?? 0) < todayMs;
     const bar: Bar = {
       id: task.id,
       title: task.title,
       status: task.status,
       leftPct: pct(start),
       widthPct: Math.max(pct(end) - pct(start), 1.5),
-      overdue,
+      state: classifyDue(task.dueDate, task.status, todayMs),
       rangeLabel: `${task.startDate ?? "…"}→${task.dueDate ?? "…"}`,
     };
     ensure(task.milestoneId ?? "__none__", "无里程碑").bars.push(bar);
@@ -207,7 +211,7 @@ function Gantt({
                     )}
                     <span
                       className={`absolute top-0 flex h-5 items-center overflow-hidden rounded px-1.5 text-[10px] text-white ${
-                        b.overdue ? "bg-high" : STATUS_BAR[b.status] ?? "bg-todo"
+                        DUE_BAR[b.state] ?? STATUS_BAR[b.status] ?? "bg-todo"
                       }`}
                       style={{ left: `${b.leftPct}%`, width: `${b.widthPct}%`, minWidth: "2rem" }}
                       title={b.rangeLabel}
@@ -227,7 +231,8 @@ function Gantt({
         <Legend cls="bg-todo" label="待办" />
         <Legend cls="bg-doing" label="进行中" />
         <Legend cls="bg-done" label="已完成" />
-        <Legend cls="bg-high" label="逾期" />
+        <Legend cls="bg-medium" label="临期（3 天内）" />
+        <Legend cls="bg-alert" label="逾期" />
         <span className="flex items-center gap-1">
           <span className="inline-block h-3 w-px bg-accent/70" /> 今日
         </span>
