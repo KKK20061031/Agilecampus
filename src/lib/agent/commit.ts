@@ -2,7 +2,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { createMilestone, createProject, getProjectForUser } from "@/lib/project";
 import { createTask, listProjectTasks, updateTask } from "@/lib/task";
-import { notifyTaskAssigned, notifyTaskCompleted } from "@/lib/notify";
+import { createWeeklyReport, generateWeeklyReport } from "@/lib/weekly-report";
 import { ForbiddenError } from "@/lib/errors";
 import type { WriteToolName } from "./tools";
 
@@ -10,6 +10,7 @@ const taskDraftSchema = z.object({
   title: z.string().min(1),
   description: z.string().optional(),
   assigneeId: z.string().optional(),
+  assigneeIds: z.array(z.string()).optional(),
   dueDate: z.string().optional(),
   milestoneId: z.string().optional(),
   priority: z.enum(["low", "medium", "high"]).optional(),
@@ -28,6 +29,7 @@ const patchSchema = z.object({
   title: z.string().optional(),
   status: z.enum(["todo", "doing", "done"]).optional(),
   assigneeId: z.string().optional(),
+  assigneeIds: z.array(z.string()).optional(),
   dueDate: z.string().optional(),
   milestoneId: z.string().optional(),
   priority: z.enum(["low", "medium", "high"]).optional(),
@@ -50,7 +52,18 @@ const createMilestoneSchema = z.object({
   targetDate: z.string().optional(),
 });
 
-export type CommitResult = { committed: number; conflicts: string[] };
+const confirmReportSchema = z.object({
+  startDate: z.string(),
+  endDate: z.string(),
+  includeRisks: z.boolean().optional(),
+});
+
+export type CommitResult = {
+  committed: number;
+  conflicts: string[];
+  reportId?: string;
+  teamId?: string;
+};
 
 // 落库：绝不信 Agent 输出——入口重校访问权，每类先施 Zod，再走图二 lib（lib 内建权限/归属校验）
 export async function commitDraft(
@@ -76,15 +89,12 @@ export async function commitDraft(
         for (const t of d.tasks) out.push(await createTask(actorId, projectId, t, { tx, actorType: "ai" }));
         return out;
       });
-      // 事务提交后补发通知（tx 路径 createTask 不 fire，由此处统一发）
-      for (const t of created) if (t.assigneeId) void notifyTaskAssigned(t);
-      return { committed: d.tasks.length, conflicts: [] };
+      return { committed: created.length, conflicts: [] };
     }
     case "update_tasks": {
       const d = updateTasksSchema.parse(draft);
       const current = await listProjectTasks(actorId, projectId);
       const versionOf = new Map(current.map((r) => [r.id, r.updatedAt.toISOString()]));
-      const prevStatus = new Map(current.map((r) => [r.id, r.status]));
       const conflicts: string[] = [];
       // 先剔除版本冲突项，余者裹事务批量应用（整批回滚保证一致）
       const toApply = d.updates.filter((u) => {
@@ -99,11 +109,7 @@ export async function commitDraft(
         for (const u of toApply) out.push(await updateTask(actorId, u.taskId, u.patch, { tx, actorType: "ai" }));
         return out;
       });
-      // 事务提交后补发完成通知：状态由非 done 转 done 者，知会创建者
-      for (const t of updatedRows) {
-        if (t.status === "done" && prevStatus.get(t.id) !== "done")
-          void notifyTaskCompleted(t, actorId);
-      }
+      // 事务提交后无需补发通知（站内通知在 updateTask 非事务路径内已发）
       return { committed: updatedRows.length, conflicts };
     }
     case "plan_sprint": {
@@ -119,6 +125,26 @@ export async function commitDraft(
       // createMilestone 内部以 role === "admin" 收口，非管理员在此被拒
       await createMilestone(actorId, projectId, d);
       return { committed: 1, conflicts: [] };
+    }
+    case "confirm_report": {
+      const d = confirmReportSchema.parse(draft);
+      // 确认卡片落库＝真正生成周报草稿（团队维度，范围默认聚焦当前项目）
+      const { title, content } = await generateWeeklyReport(actorId, {
+        teamId: access.project.teamId,
+        projectId,
+        startDate: d.startDate,
+        endDate: d.endDate,
+        includeRisks: d.includeRisks ?? true,
+      });
+      const report = await createWeeklyReport(actorId, {
+        teamId: access.project.teamId,
+        projectId,
+        periodStart: d.startDate,
+        periodEnd: d.endDate,
+        title,
+        content,
+      });
+      return { committed: 1, conflicts: [], reportId: report.id, teamId: access.project.teamId };
     }
   }
 }

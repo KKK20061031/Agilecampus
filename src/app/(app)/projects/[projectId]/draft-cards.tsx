@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 
 export type Draft = { tool: string; draft: unknown };
 type Option = { id: string; name: string };
@@ -17,6 +18,103 @@ async function commit(projectId: string, tool: string, draft: unknown): Promise<
   if (Array.isArray(data.conflicts) && data.conflicts.length > 0)
     return `有 ${data.conflicts.length} 项因他人改动未落库，请刷新后重试`;
   return null;
+}
+
+// 周报确认卡片专用：确认后直接生成周报草稿，成功返回报告链接
+async function commitReport(
+  projectId: string,
+  draft: { startDate: string; endDate: string; includeRisks?: boolean },
+) {
+  const res = await fetch("/api/chat/commit", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId, tool: "confirm_report", draft }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { error: data.error ?? "生成失败" };
+  return {
+    error: null,
+    reportId: data.reportId as string | undefined,
+    teamId: data.teamId as string | undefined,
+  };
+}
+
+function ConfirmReportCard({
+  projectId,
+  draft,
+}: {
+  projectId: string;
+  draft: { startDate: string; endDate: string; includeRisks?: boolean };
+}) {
+  const [data, setData] = useState(draft);
+  const [state, setState] = useState<"idle" | "pending" | "done">("idle");
+  const [err, setErr] = useState<string | null>(null);
+  const [link, setLink] = useState<string | null>(null);
+
+  if (state === "done")
+    return (
+      <div className="ac-card p-2 text-xs text-done">
+        周报草稿已生成 ✓
+        {link && (
+          <Link href={link} className="ml-2 underline hover:text-primary">
+            查看周报
+          </Link>
+        )}
+      </div>
+    );
+
+  return (
+    <div className="ac-card space-y-2 border-accent/30 bg-accent-soft p-2 text-sm">
+      <p className="text-xs font-medium text-accent">待确认：生成周报</p>
+      <div className="flex flex-wrap gap-1">
+        <label className="flex items-center gap-1 text-xs text-ink-soft">
+          起始
+          <input
+            type="date"
+            value={data.startDate}
+            onChange={(e) => setData({ ...data, startDate: e.target.value })}
+            className="ac-field w-auto text-xs"
+          />
+        </label>
+        <label className="flex items-center gap-1 text-xs text-ink-soft">
+          结束
+          <input
+            type="date"
+            value={data.endDate}
+            onChange={(e) => setData({ ...data, endDate: e.target.value })}
+            className="ac-field w-auto text-xs"
+          />
+        </label>
+        <label className="flex items-center gap-1 text-xs text-ink-soft">
+          <input
+            type="checkbox"
+            checked={data.includeRisks ?? true}
+            onChange={(e) => setData({ ...data, includeRisks: e.target.checked })}
+          />
+          含风险与下一周期计划
+        </label>
+      </div>
+      {err && <p className="text-xs text-high">{err}</p>}
+      <button
+        disabled={state === "pending"}
+        onClick={async () => {
+          setState("pending");
+          setErr(null);
+          const r = await commitReport(projectId, data);
+          if (r.error) {
+            setErr(r.error);
+            setState("idle");
+          } else {
+            setState("done");
+            setLink(r.teamId && r.reportId ? `/teams/${r.teamId}/reports/${r.reportId}` : null);
+          }
+        }}
+        className="ac-btn px-2 py-1 text-xs"
+      >
+        {state === "pending" ? "生成中…" : "确认生成"}
+      </button>
+    </div>
+  );
 }
 
 function CardShell({
@@ -146,16 +244,29 @@ function DraftCard({
 
   if (draft.tool === "decompose_tasks") {
     const d = data as {
-      tasks: { title: string; assigneeId?: string; priority?: string; dueDate?: string; milestoneId?: string }[];
+      tasks: {
+        title: string;
+        assigneeId?: string;
+        assigneeIds?: string[];
+        priority?: string;
+        dueDate?: string;
+        milestoneId?: string;
+      }[];
     };
     const setTask = (idx: number, patch: object) =>
       setData({ ...d, tasks: d.tasks.map((t, i) => (i === idx ? { ...t, ...patch } : t)) });
+    const nameOf = (id: string) => members.find((m) => m.id === id)?.name ?? "某成员";
     return (
       <CardShell title={`拆解任务（${d.tasks.length}）`} onConfirm={() => commit(projectId, "decompose_tasks", d)}>
         {d.tasks.map((t, idx) => (
-          <div key={idx} className="flex flex-wrap gap-1 border-b border-line pb-1">
+          <div key={idx} className="flex flex-wrap items-center gap-1 border-b border-line pb-1">
             <input value={t.title} onChange={(e) => setTask(idx, { title: e.target.value })} className="ac-field flex-1 text-xs" />
-            <select value={t.assigneeId ?? ""} onChange={(e) => setTask(idx, { assigneeId: e.target.value || undefined })} className="ac-field w-auto text-xs">
+            {/* AI 可能给出多负责人；此处下拉是「改为单一负责人」的快捷方式，选了即覆盖集合 */}
+            <select
+              value={t.assigneeId ?? ""}
+              onChange={(e) => setTask(idx, { assigneeId: e.target.value || undefined, assigneeIds: undefined })}
+              className="ac-field w-auto text-xs"
+            >
               <option value="">未分配</option>
               {members.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -163,6 +274,11 @@ function DraftCard({
                 </option>
               ))}
             </select>
+            {t.assigneeIds && t.assigneeIds.length > 0 && (
+              <span className="text-xs text-ink-soft">
+                多人：{t.assigneeIds.map(nameOf).join("、")}
+              </span>
+            )}
             <select value={t.priority ?? "medium"} onChange={(e) => setTask(idx, { priority: e.target.value })} className="ac-field w-auto text-xs">
               <option value="low">低</option>
               <option value="medium">中</option>
@@ -209,6 +325,11 @@ function DraftCard({
         </div>
       </CardShell>
     );
+  }
+
+  if (draft.tool === "confirm_report") {
+    const d = data as { startDate: string; endDate: string; includeRisks?: boolean };
+    return <ConfirmReportCard projectId={projectId} draft={d} />;
   }
 
   return null;

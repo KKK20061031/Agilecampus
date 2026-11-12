@@ -3,6 +3,8 @@ import { db } from "@/db";
 import { resourceUsages, users } from "@/db/schema";
 import { AppError, ForbiddenError } from "./errors";
 import { getTeamMembership } from "./team";
+import { isTeamLead } from "./team-permissions";
+import { notifyTeamMembers } from "./notification";
 
 export interface CreateResourceUsageInput {
   resourceName: string;
@@ -37,6 +39,15 @@ export async function createResourceUsage(
       endTime: input.endTime ?? null,
     })
     .returning();
+
+  void notifyTeamMembers({
+    teamId,
+    actorId,
+    type: "resource_logged",
+    title: "资源占用登记",
+    content: `登记了资源占用：${name}`,
+    linkUrl: `/teams/${teamId}/resources`,
+  });
   return usage;
 }
 
@@ -50,7 +61,7 @@ export async function endResourceUsage(actorId: string, usageId: string) {
 
   if (usage.userId !== actorId) {
     const membership = await getTeamMembership(actorId, usage.teamId);
-    if (!membership || membership.role !== "admin") throw new ForbiddenError();
+    if (!membership || !isTeamLead(membership.role)) throw new ForbiddenError();
   }
   if (usage.endTime) throw new AppError("该占用已结束");
 
@@ -60,6 +71,15 @@ export async function endResourceUsage(actorId: string, usageId: string) {
     .where(and(eq(resourceUsages.id, usageId), isNull(resourceUsages.endTime)))
     .returning();
   if (!ended) throw new AppError("该占用已结束");
+
+  void notifyTeamMembers({
+    teamId: usage.teamId,
+    actorId,
+    type: "resource_ended",
+    title: "资源占用结束",
+    content: `结束了资源占用：${usage.resourceName}`,
+    linkUrl: `/teams/${usage.teamId}/resources`,
+  });
   return ended;
 }
 

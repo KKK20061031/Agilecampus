@@ -10,15 +10,19 @@ import {
   type UpdateTaskState,
 } from "./actions";
 import { LABEL_COLOR_CLASS } from "@/lib/board-columns";
+import { classifyDue, todayStartMs } from "@/lib/due";
 import type { BoardTask } from "./board";
+import { MemberPicker } from "./member-picker";
+import { TaskAssets } from "./assets/task-assets";
 
-export type Option = { id: string; name: string };
+export type Option = { id: string; name: string; skillTags?: string[] };
 type TaskOption = { id: string; title: string };
 
+// 优先级颜色映射（背景色 + 文字色）
 const PRIORITY_BADGE: Record<string, string> = {
-  high: "bg-high-soft text-high",
-  medium: "bg-medium-soft text-medium",
-  low: "bg-low-soft text-low",
+  high: "bg-red-100 text-red-700",    // 高：浅红底，深红字
+  medium: "bg-amber-100 text-amber-700", // 中：浅黄底，深黄字
+  low: "bg-green-100 text-green-700",   // 低：浅绿底，深绿字
 };
 
 export function TaskCard({
@@ -58,6 +62,19 @@ export function TaskCard({
     .filter((d) => d.predecessorId === task.id)
     .map((d) => allTasks.find((t) => t.id === d.successorId)?.title)
     .filter(Boolean);
+  const dueState = classifyDue(task.dueDate, task.status, todayStartMs());
+  // 多负责人：优先按 id 集合映射成员名（拖拽落列后乐观更新也能立刻显示新负责人）
+  const assigneeNames =
+    task.assigneeIds.length > 0
+      ? task.assigneeIds.map(
+          (id) =>
+            members.find((m) => m.id === id)?.name ??
+            task.assignees.find((a) => a.id === id)?.name ??
+            "某成员",
+        )
+      : task.assigneeName
+        ? [task.assigneeName]
+        : [];
 
   return (
     <div
@@ -67,7 +84,13 @@ export function TaskCard({
           ? { transform: `translate(${transform.x}px, ${transform.y}px)` }
           : undefined
       }
-      className={`ac-card p-3 text-sm transition hover:shadow-md ${isDragging ? "opacity-50" : ""}`}
+      className={`ac-card p-3 text-sm transition hover:shadow-md ${
+        dueState === "overdue"
+          ? "border-high"
+          : dueState === "soon"
+            ? "border-medium"
+            : ""
+      } ${isDragging ? "opacity-50" : ""}`}
     >
       <div
         {...listeners}
@@ -76,13 +99,31 @@ export function TaskCard({
       >
         <p className="font-medium text-ink">{task.title}</p>
         <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-ink-soft">
-          <span>{task.assigneeName ?? "未分配"}</span>
-          {(task.startDate || task.dueDate) && (
-            <span>· {task.startDate ?? "…"}→{task.dueDate ?? "…"}</span>
+          <span>{assigneeNames.length > 0 ? assigneeNames.join("、") : "未分配"}</span>          {(task.startDate || task.dueDate) && (
+            <span
+              className={
+                dueState === "overdue"
+                  ? "font-medium text-alert"
+                  : dueState === "soon"
+                    ? "font-medium text-medium"
+                    : ""
+              }
+            >
+              · {task.startDate ?? "…"}→{task.dueDate ?? "…"}
+            </span>
+          )}
+          {dueState !== "ok" && (
+            <span
+              className={`ac-badge ${
+                dueState === "overdue" ? "bg-alert-soft text-alert" : "bg-medium-soft text-medium"
+              }`}
+            >
+              {dueState === "overdue" ? "逾期" : "临期"}
+            </span>
           )}
           <span className={`ac-badge ${PRIORITY_BADGE[task.priority] ?? "bg-low-soft text-low"}`}>
-            {task.priority}
-          </span>
+  {task.priority === "high" ? "高" : task.priority === "medium" ? "中" : "低"}
+</span>
         </p>
         {task.labels.length > 0 && (
           <p className="mt-1 flex flex-wrap items-center gap-1">
@@ -99,6 +140,26 @@ export function TaskCard({
             )}
           </p>
         )}
+        {(() => {
+          const d = task.deliverables;
+          const items = [
+            { key: "presentation", icon: "📊", label: "演示文稿", n: d?.presentation ?? 0 },
+            { key: "survey", icon: "📝", label: "问卷", n: d?.survey ?? 0 },
+            { key: "code", icon: "📦", label: "代码包", n: d?.code ?? 0 },
+            { key: "other", icon: "📎", label: "其他文件", n: d?.other ?? 0 },
+          ].filter((x) => x.n > 0);
+          if (items.length === 0) return null;
+          return (
+            <p className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-soft" title="已挂载交付物">
+              {items.map((x) => (
+                <span key={x.key} className="ac-badge bg-sunken text-ink-soft">
+                  <span aria-hidden>{x.icon}</span>
+                  <span className="ml-0.5">×{x.n}</span>
+                </span>
+              ))}
+            </p>
+          );
+        })()}
         {task.description && (
           <p className="mt-1 text-xs text-ink-soft line-clamp-2">{task.description}</p>
         )}
@@ -233,40 +294,40 @@ function EditModal({
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-2.5">
-            <Field label="负责人">
-              <select name="assigneeId" defaultValue={task.assigneeId ?? ""} className="ac-field text-sm">
-                <option value="">未分配</option>
-                {members.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
+          <div className="space-y-2.5">
+            <Field label="负责人（可多选）">
+              <MemberPicker
+                members={members}
+                name="assigneeIds"
+                defaultSelected={task.assigneeIds.length > 0 ? task.assigneeIds : []}
+                emptyHint="未选择，保存后为未分配"
+              />
             </Field>
-            <Field label="里程碑">
-              <select name="milestoneId" defaultValue={task.milestoneId ?? ""} className="ac-field text-sm">
-                <option value="">无里程碑</option>
-                {milestones.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="优先级">
-              <select name="priority" defaultValue={task.priority} className="ac-field text-sm">
-                <option value="low">低</option>
-                <option value="medium">中</option>
-                <option value="high">高</option>
-              </select>
-            </Field>
-            <Field label="起始日">
-              <input type="date" name="startDate" defaultValue={task.startDate ?? ""} className="ac-field text-sm" />
-            </Field>
-            <Field label="截止日">
-              <input type="date" name="dueDate" defaultValue={task.dueDate ?? ""} className="ac-field text-sm" />
-            </Field>
+            <div className="grid grid-cols-2 gap-2.5">
+              <Field label="里程碑">
+                <select name="milestoneId" defaultValue={task.milestoneId ?? ""} className="ac-field text-sm">
+                  <option value="">无里程碑</option>
+                  {milestones.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="优先级">
+                <select name="priority" defaultValue={task.priority} className="ac-field text-sm">
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </Field>
+              <Field label="起始日">
+                <input type="date" name="startDate" defaultValue={task.startDate ?? ""} className="ac-field text-sm" />
+              </Field>
+              <Field label="截止日">
+                <input type="date" name="dueDate" defaultValue={task.dueDate ?? ""} className="ac-field text-sm" />
+              </Field>
+            </div>
           </div>
 
           {allLabels.length > 0 && (
@@ -318,6 +379,9 @@ function EditModal({
             </button>
           </div>
         </form>
+
+        {/* 挂载资产：绑定项目已有资产或上传新资产（写入 assets.taskId） */}
+        <TaskAssets projectId={projectId} taskId={task.id} />
 
         <form
           action={deleteFormAction}

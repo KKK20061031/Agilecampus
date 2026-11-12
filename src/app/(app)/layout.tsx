@@ -1,7 +1,13 @@
-import Link from "next/link";
+import { Suspense } from "react";
 import { redirect } from "next/navigation";
-import { auth, signOut } from "@/lib/auth";
+import { auth } from "@/lib/auth";
 import { countUnreadNotifications } from "@/lib/notification";
+import { countUnreadChats } from "@/lib/chat";
+import { syncDueSoonNotifications } from "@/lib/reminder";
+import { listMyTeamsWithProjects } from "@/lib/project";
+import { AppSidebar } from "./app-sidebar";
+import { DueReminderBanner } from "./due-reminder-banner";
+import { getWorkbenchReminders } from "@/lib/workbench-reminders";
 
 export default async function AppLayout({
   children,
@@ -10,66 +16,31 @@ export default async function AppLayout({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  const unreadCount = await countUnreadNotifications(session.user.id);
+  // 进入应用即生成临期/逾期提醒（按天去重），再统计未读，使角标即时反映
+  await syncDueSoonNotifications(session.user.id);
+  const [unreadCount, unreadChats, teams, reminders] = await Promise.all([
+    countUnreadNotifications(session.user.id),
+    countUnreadChats(session.user.id),
+    listMyTeamsWithProjects(session.user.id),
+    getWorkbenchReminders(session.user.id),
+  ]);
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-20 flex items-center justify-between border-b border-line bg-surface/85 px-6 py-3 backdrop-blur">
-        <div className="flex items-center gap-6">
-          <Link href="/projects" className="flex items-center gap-2">
-            <span
-              aria-hidden
-              className="grid h-7 w-7 place-items-center rounded-md bg-primary font-display text-sm font-bold text-white shadow-sm"
-            >
-              A
-            </span>
-            <span className="font-display text-lg font-semibold text-ink">AgileCampus</span>
-          </Link>
-          <nav className="flex items-center gap-1">
-            <Link
-              href="/projects"
-              className="rounded-field px-2.5 py-1.5 text-sm text-ink-soft transition-colors hover:bg-primary-soft hover:text-primary"
-            >
-              所有项目
-            </Link>
-            <Link
-              href="/teams"
-              className="rounded-field px-2.5 py-1.5 text-sm text-ink-soft transition-colors hover:bg-primary-soft hover:text-primary"
-            >
-              我的团队
-            </Link>
-            <Link
-              href="/notifications"
-              className="relative rounded-field px-2.5 py-1.5 text-sm text-ink-soft transition-colors hover:bg-primary-soft hover:text-primary"
-              aria-label={`通知${unreadCount ? `，${unreadCount} 条未读` : ""}`}
-            >
-              通知
-              {unreadCount > 0 && (
-                <span className="ml-1 inline-grid min-h-4 min-w-4 place-items-center rounded-full bg-high px-1 text-[10px] font-semibold text-white">
-                  {unreadCount > 99 ? "99+" : unreadCount}
-                </span>
-              )}
-            </Link>
-            <Link
-              href="/settings/tokens"
-              className="rounded-field px-2.5 py-1.5 text-sm text-ink-soft transition-colors hover:bg-primary-soft hover:text-primary"
-            >
-              设置
-            </Link>
-          </nav>
-        </div>
-        <form
-          action={async () => {
-            "use server";
-            await signOut({ redirectTo: "/login" });
-          }}
-          className="flex items-center gap-3"
-        >
-          <span className="hidden text-sm text-ink-soft sm:inline">{session.user.name}</span>
-          <button className="ac-btn-ghost">退出</button>
-        </form>
-      </header>
-      <div className="mx-auto max-w-5xl p-6">{children}</div>
+    <div className="flex min-h-screen">
+      <Suspense>
+        <AppSidebar
+          userName={session.user.name}
+          teams={teams}
+          unreadChats={unreadChats}
+          unreadNotifications={unreadCount}
+        />
+      </Suspense>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Suspense>
+          <DueReminderBanner summaries={reminders.byTeam} teamIds={teams.map((team) => team.id)} />
+        </Suspense>
+        <div className="mx-auto w-full max-w-6xl px-6 py-8">{children}</div>
+      </div>
     </div>
   );
 }

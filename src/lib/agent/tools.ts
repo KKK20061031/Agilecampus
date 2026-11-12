@@ -31,7 +31,8 @@ export async function listTasksFiltered(
 ) {
   let list = await listProjectTasks(actorId, projectId);
   if (filters.status) list = list.filter((t) => t.status === filters.status);
-  if (filters.assigneeId) list = list.filter((t) => t.assigneeId === filters.assigneeId);
+  // 按负责人筛选＝该任务指派给此人（多负责人集合，任一命中即可）
+  if (filters.assigneeId) list = list.filter((t) => t.assigneeIds.includes(filters.assigneeId!));
   if (filters.dueBefore)
     list = list.filter((t) => t.dueDate !== null && t.dueDate <= filters.dueBefore!);
   return list.map((t) => ({
@@ -40,7 +41,9 @@ export async function listTasksFiltered(
     status: t.status,
     priority: t.priority,
     dueDate: t.dueDate,
+    // assigneeName 为主负责人（兼容既有调用），assigneeNames 为完整集合
     assigneeName: t.assigneeName,
+    assigneeNames: t.assignees.map((a) => a.name),
   }));
 }
 
@@ -115,6 +118,7 @@ export function buildTools(actorId: string, projectId: string) {
             title: z.string(),
             description: z.string().optional(),
             assigneeId: z.string().optional(),
+            assigneeIds: z.array(z.string()).optional().describe("多负责人（优先于 assigneeId）"),
             dueDate: z.string().optional(),
             milestoneId: z.string().optional(),
             priority: z.enum(["low", "medium", "high"]).optional(),
@@ -133,6 +137,7 @@ export function buildTools(actorId: string, projectId: string) {
               title: z.string().optional(),
               status: z.enum(["todo", "doing", "done"]).optional(),
               assigneeId: z.string().optional(),
+              assigneeIds: z.array(z.string()).optional().describe("多负责人（优先于 assigneeId）"),
               dueDate: z.string().optional(),
               milestoneId: z.string().optional(),
               priority: z.enum(["low", "medium", "high"]).optional(),
@@ -169,6 +174,16 @@ export function buildTools(actorId: string, projectId: string) {
       }),
       execute: async (input) => draftEnvelope("create_milestone", input),
     }),
+    confirm_report: tool({
+      description:
+        "生成周报前先解析时间范围并产出确认卡片。范围经用户在卡片上确认后才真正生成周报草稿；未经确认绝不生成。范围即当前项目。",
+      inputSchema: z.object({
+        startDate: z.string().describe("YYYY-MM-DD"),
+        endDate: z.string().describe("YYYY-MM-DD"),
+        includeRisks: z.boolean().optional().describe("是否包含风险与下一周期建议，默认 true"),
+      }),
+      execute: async (input) => draftEnvelope("confirm_report", input),
+    }),
   };
 }
 
@@ -178,6 +193,7 @@ export const WRITE_TOOL_NAMES = [
   "update_tasks",
   "plan_sprint",
   "create_milestone",
+  "confirm_report",
 ] as const;
 
 export type WriteToolName = (typeof WRITE_TOOL_NAMES)[number];
